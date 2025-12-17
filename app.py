@@ -39,7 +39,7 @@ def load_portfolio():
     try:
         gc = get_gsheet_client()
         sh = gc.open(PORTFOLIO_SHEET_TITLE)
-        df = pd.DataFrame(sh.sheet1.get_all_records())
+        df = pd.DataFrame(sh.sheet2.get_all_records())
         df['Symbol'] = df['Symbol'].astype(str).str.zfill(4)
         return df
     except:
@@ -240,7 +240,7 @@ elif st.session_state.menu == "management":
     edited = st.data_editor(portfolio, hide_index=True, use_container_width=True)
     if st.button("💾 儲存所有變更"):
         gc = get_gsheet_client()
-        sh = gc.open(PORTFOLIO_SHEET_TITLE).sheet1
+        sh = gc.open(PORTFOLIO_SHEET_TITLE).sheet2
         sh.clear()
         sh.update('A1', [portfolio.columns.tolist()] + edited.values.tolist())
         st.cache_data.clear(); st.rerun()
@@ -268,3 +268,4 @@ if 'current_plot' in st.session_state:
     fig.add_trace(go.Bar(x=p_df.index, y=p_df['Hist'], marker_color=bar_colors, name='OSC柱狀圖'), row=3, col=1)
     fig.update_layout(height=850, xaxis_rangeslider_visible=False, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
+
