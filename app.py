@@ -70,7 +70,6 @@ STOCK_OPTIONS = [f"{k} {v['名稱']} ({v['產業']})" for k, v in MARKET_MAP.ite
 def get_strategy_suggestion(df):
     if df is None or df.empty or len(df) < 26: 
         return ("資料不足", "#9e9e9e", "<span>資料不足以產生訊號</span>", "")
-    
     last_row = df.iloc[-1]
     prev_row = df.iloc[-2]
     curr_price = last_row['Close']
@@ -101,25 +100,31 @@ def get_strategy_suggestion(df):
 @st.cache_data(ttl=600)
 def fetch_finmind_history(symbol):
     """
-    從 FinMind 抓取歷史數據並計算指標
+    取代 yfinance 爬取 FinMind 的數據，並維持原始技術指標邏輯
     """
-    time.sleep(random.uniform(0.3, 0.7))
-    start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
-    url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockPrice",
-        "data_id": symbol,
-        "start_date": start_date
-    }
-    
+    time.sleep(random.uniform(0.1, 0.3)) # FinMind 速度較快，縮短間隔
     try:
-        res = requests.get(url, params=params, timeout=10)
+        # 設定抓取 2 年數據
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
+        
+        # 使用 FinMind 開放 API
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": "TaiwanStockPrice",
+            "data_id": symbol,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+        
+        res = requests.get(url, params=params)
         data = res.json()
+        
         if data['msg'] != 'success' or not data['data']:
             return None
         
         df = pd.DataFrame(data['data'])
-        # 轉換欄位名稱以符合後續邏輯
+        # 統一欄位名稱與 yfinance 格式一致以維持後續邏輯
         df = df.rename(columns={
             'date': 'Date',
             'open': 'Open',
@@ -131,7 +136,7 @@ def fetch_finmind_history(symbol):
         df['Date'] = pd.to_datetime(df['Date'])
         df.set_index('Date', inplace=True)
         
-        # --- 計算技術指標 ---
+        # --- 維持原代碼指標運算邏輯 ---
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA60'] = df['Close'].rolling(60).mean()
         std20 = df['Close'].rolling(20).std()
@@ -150,11 +155,12 @@ def fetch_finmind_history(symbol):
         
         return df
     except Exception as e:
+        # st.error(f"獲取 {symbol} 失敗: {e}")
         return None
 
 # --- 2. 側邊導覽 ---
 with st.sidebar:
-    st.title("🛡️ 數據戰情室 (FinMind)")
+    st.title("🛡️ 數據戰情室")
     if 'menu' not in st.session_state: st.session_state.menu = "portfolio"
     if st.button("🚀 庫存個股監控"): st.session_state.menu = "portfolio"
     if st.button("💰 低基期快篩"): st.session_state.menu = "screening"
@@ -173,9 +179,7 @@ if st.session_state.menu == "portfolio":
     if not portfolio.empty:
         total_mv, total_cost = 0.0, 0.0
         details = []
-        # 進度條優化體驗
-        progress_bar = st.progress(0)
-        for idx, (_, r) in enumerate(portfolio.iterrows()):
+        for _, r in portfolio.iterrows():
             m_data = MARKET_MAP.get(r['Symbol'])
             if m_data:
                 curr_p = m_data['現價']
@@ -183,12 +187,10 @@ if st.session_state.menu == "portfolio":
                 cv = r['Cost'] * r['Shares']
                 total_mv += mv
                 total_cost += cv
-                # 改用 FinMind 抓取
+                # 改用 FinMind
                 hist_df = fetch_finmind_history(r['Symbol'])
                 strat_name, strat_color, _, _ = get_strategy_suggestion(hist_df)
                 details.append({'r': r, 'm': m_data, 'cp': curr_p, 'strat': (strat_name, strat_color), 'df': hist_df})
-            progress_bar.progress((idx + 1) / len(portfolio))
-        progress_bar.empty()
 
         diff = total_mv - total_cost
         p_ratio = (diff / total_cost * 100) if total_cost > 0 else 0
@@ -245,11 +247,11 @@ elif st.session_state.menu == "screening":
     if 'scan_results_df' in st.session_state:
         df_display = st.session_state.scan_results_df
         if not df_display.empty:
-            st.info(f"符合標的共 {len(df_display)} 筆 (僅分析前 12 筆以確保效能)")
+            st.info(f"符合標的共 {len(df_display)} 筆")
             sc_cols = st.columns(3)
-            # 為避免 API 請求過多，快篩結果顯示前 12 筆的技術面
-            for i, (idx, row) in enumerate(df_display.head(12).iterrows()):
+            for i, (idx, row) in enumerate(df_display.iterrows()):
                 with sc_cols[i % 3]:
+                    # 改用 FinMind
                     h_df = fetch_finmind_history(row['代碼'])
                     strat_name, strat_color, _, _ = get_strategy_suggestion(h_df)
                     st.markdown(f"""
@@ -269,11 +271,9 @@ elif st.session_state.menu == "diagnosis":
     selection = st.selectbox("搜尋標的", options=["請選擇..."] + STOCK_OPTIONS)
     if st.button("執行診斷") and selection != "請選擇...":
         code, name = selection.split(" ")[0], selection.split(" ")[1]
+        # 改用 FinMind
         df = fetch_finmind_history(code)
-        if df is not None: 
-            st.session_state.current_plot = (df, name)
-        else:
-            st.error("無法抓取數據，請稍後再試。")
+        if df is not None: st.session_state.current_plot = (df, name)
 
 elif st.session_state.menu == "management":
     st.markdown('<div class="function-title">功能：📝 庫存清單管理系統</div>', unsafe_allow_html=True)
@@ -310,7 +310,7 @@ elif st.session_state.menu == "management":
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"❌ 寫入失敗: {e}")
+                st.error(f"❌ 寫入失敗，請檢查權限或網路: {e}")
 
 # --- 底部圖表 ---
 if 'current_plot' in st.session_state:
@@ -335,3 +335,4 @@ if 'current_plot' in st.session_state:
     fig.add_trace(go.Bar(x=p_df.index, y=p_df['Hist'], marker_color=bar_colors, name='OSC柱狀圖'), row=3, col=1)
     fig.update_layout(height=850, xaxis_rangeslider_visible=False, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
+
