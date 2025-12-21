@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 0. 基礎設定 ---
 PORTFOLIO_SHEET_TITLE = 'Streamlit TW Stock_Pei' 
-st.set_page_config(page_title="台股戰情指揮中心 V13.2", layout="wide", page_icon="📈")
+st.set_page_config(page_title="台股戰情指揮中心 V13.1 (穩定版)", layout="wide", page_icon="📈")
 
 st.markdown("""
     <style>
@@ -49,26 +49,42 @@ def load_portfolio():
 
 @st.cache_data(ttl=3600)
 def get_market_data():
+    """抓取全市場清單，包含重試機制與備援路徑"""
     url = "https://stock.wespai.com/lists"
-    # 增加多種 User-Agent 模擬
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    # 嘗試抓取 Wespai
+    for _ in range(3): # 最多重試 3 次
+        try:
+            res = requests.get(url, headers=headers, timeout=20)
+            df = pd.read_html(res.text)[0]
+            data = df.iloc[:, [0, 1, 2, 3, 14, 15]].copy()
+            data.columns = ['代碼', '名稱', '產業', '現價', 'PE', 'PB']
+            data['代碼'] = data['代碼'].astype(str).str.zfill(4)
+            data['現價'] = pd.to_numeric(data['現價'], errors='coerce')
+            data['PE'] = pd.to_numeric(data['PE'], errors='coerce').fillna(999.0)
+            data['PB'] = pd.to_numeric(data['PB'], errors='coerce').fillna(999.0)
+            return data.set_index('代碼').to_dict('index')
+        except Exception:
+            time.sleep(2)
+            continue
+            
+    # 備援路徑：如果 Wespai 失敗，改用 FinMind 基本資訊 (雖然沒有即時現價和 PE)
     try:
-        res = requests.get(url, headers=headers, timeout=20)
-        res.encoding = 'utf-8' # 強制編碼避免亂碼
-        df_list = pd.read_html(res.text)
-        if not df_list: return {}
-        
-        df = df_list[0]
-        # 根據原始結構選取：代碼, 名稱, 產業, 現價, PE(14), PB(15)
-        data = df.iloc[:, [0, 1, 2, 3, 14, 15]].copy()
-        data.columns = ['代碼', '名稱', '產業', '現價', 'PE', 'PB']
-        data['代碼'] = data['代碼'].astype(str).str.zfill(4)
-        data['現價'] = pd.to_numeric(data['現價'], errors='coerce')
-        data['PE'] = pd.to_numeric(data['PE'], errors='coerce').fillna(999.0)
-        data['PB'] = pd.to_numeric(data['PB'], errors='coerce').fillna(999.0)
-        return data.set_index('代碼').to_dict('index')
-    except Exception as e:
-        st.warning(f"目前無法連線至 Wespai 市場數據源。快篩功能將暫時無法使用。({e})")
+        fm_url = "https://api.finmindtrade.com/api/v4/data"
+        res = requests.get(fm_url, params={"dataset": "TaiwanStockInfo"}, timeout=15)
+        fm_data = res.json()['data']
+        backup_dict = {}
+        for item in fm_data:
+            code = item['stock_id']
+            backup_dict[code] = {
+                '名稱': item['stock_name'],
+                '產業': item['industry_category'],
+                '現價': 0.0, 'PE': 0.0, 'PB': 0.0
+            }
+        return backup_dict
+    except:
+        st.error("所有市場數據來源均連線失敗，請檢查網路。")
         return {}
 
 MARKET_MAP = get_market_data()
@@ -94,25 +110,25 @@ def get_strategy_suggestion(df):
     is_bullish_trend = curr_price > sma20 and sma20 > sma60
     
     if is_panic:
-        return ("極度恐慌", "#d32f2f", f"<div style='background:#ffebee; padding:10px; border-left:5px solid #d32f2f; border-radius:5px;'><b style='color:#d32f2f'>⚠️ 極度恐慌 (RSI < 25)</b><br>RSI: {rsi:.1f}，市場情緒悲觀。</div>", f"RSI: {rsi:.1f}")
+        return ("極度恐慌", "#d32f2f", f"<div style='background:#ffebee; padding:10px; border-left:5px solid #d32f2f; border-radius:5px;'><b style='color:#d32f2f'>⚠️ 極度恐慌 (RSI < 25)</b><br>RSI: {rsi:.1f}</div>", f"RSI: {rsi:.1f}")
     elif is_oversold and is_buy_zone and macd_turn_up:
         return ("黃金買訊", "#2e7d32", f"<div style='background:#e8f5e9; padding:10px; border-left:5px solid #2e7d32; border-radius:5px;'><b style='color:#2e7d32'>🔥 強力買進訊號</b><br>RSI低檔 + 布林下軌 + MACD轉折。</div>", "技術面買訊")
     elif rsi > 75:
-        return ("高檔過熱", "#ef6c00", f"<div style='background:#fff3e0; padding:10px; border-left:5px solid #ef6c00; border-radius:5px;'><b style='color:#ef6c00'>⛔ 高檔過熱 (RSI > 75)</b><br>RSI: {rsi:.1f}，建議減碼。</div>", f"RSI: {rsi:.1f}")
+        return ("高檔過熱", "#ef6c00", f"<div style='background:#fff3e0; padding:10px; border-left:5px solid #ef6c00; border-radius:5px;'><b style='color:#ef6c00'>⛔ 高檔過熱 (RSI > 75)</b><br>RSI: {rsi:.1f}</div>", f"RSI: {rsi:.1f}")
     elif is_bullish_trend and macd_hist > 0:
-        return ("多頭續抱", "#1976d2", f"<div style='background:#e3f2fd; padding:10px; border-left:5px solid #1976d2; border-radius:5px;'><b style='color:#1976d2'>📈 多頭排列</b><br>股價動能強勁。</div>", "動能強勁")
+        return ("多頭續抱", "#1976d2", f"<div style='background:#e3f2fd; padding:10px; border-left:5px solid #1976d2; border-radius:5px;'><b style='color:#1976d2'>📈 多頭排列</b></div>", "動能強勁")
     else:
-        return ("觀望整理", "#757575", f"<div style='background:#f5f5f5; padding:10px; border-left:5px solid #757575; border-radius:5px;'><b style='color:#616161'>☕ 盤整中</b><br>等待趨勢確立。</div>", f"RSI: {rsi:.1f}")
+        return ("觀望整理", "#757575", f"<div style='background:#f5f5f5; padding:10px; border-left:5px solid #757575; border-radius:5px;'><b style='color:#616161'>☕ 盤整中</b></div>", f"RSI: {rsi:.1f}")
 
 @st.cache_data(ttl=600)
 def fetch_finmind_history(symbol):
-    time.sleep(random.uniform(0.1, 0.3)) 
+    time.sleep(random.uniform(0.1, 0.3))
     try:
         end_date = datetime.now().strftime('%Y-%m-%d')
         start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
         url = "https://api.finmindtrade.com/api/v4/data"
         params = {"dataset": "TaiwanStockPrice", "data_id": symbol, "start_date": start_date, "end_date": end_date}
-        res = requests.get(url, params=params)
+        res = requests.get(url, params=params, timeout=15)
         data = res.json()
         if data['msg'] != 'success' or not data['data']: return None
         
@@ -121,6 +137,7 @@ def fetch_finmind_history(symbol):
         df['Date'] = pd.to_datetime(df['Date'])
         df.set_index('Date', inplace=True)
         
+        # 指標運算
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA60'] = df['Close'].rolling(60).mean()
         std20 = df['Close'].rolling(20).std()
@@ -135,13 +152,14 @@ def fetch_finmind_history(symbol):
         df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         df['Hist'] = df['MACD'] - df['Signal']
         return df
-    except:
+    except Exception:
         return None
 
 # --- 2. 側邊導覽 ---
 with st.sidebar:
     st.title("🛡️ 數據戰情室")
     if 'menu' not in st.session_state: st.session_state.menu = "portfolio"
+    cols_nav = st.columns(1)
     if st.button("🚀 庫存個股監控", use_container_width=True): st.session_state.menu = "portfolio"
     if st.button("💰 低基期快篩", use_container_width=True): st.session_state.menu = "screening"
     if st.button("🔍 免庫存診斷", use_container_width=True): st.session_state.menu = "diagnosis"
@@ -150,8 +168,7 @@ with st.sidebar:
 if 'df_portfolio' not in st.session_state:
     st.session_state.df_portfolio = load_portfolio()
 
-# --- 各項功能邏輯 ---
-
+# --- 各功能模塊 ---
 if st.session_state.menu == "portfolio":
     st.markdown('<div class="function-title">功能：🚀 庫存動態監控</div>', unsafe_allow_html=True)
     portfolio = st.session_state.df_portfolio
@@ -202,60 +219,39 @@ if st.session_state.menu == "portfolio":
 
 elif st.session_state.menu == "screening":
     st.markdown('<div class="function-title">功能：💰 低基期潛力標的快篩</div>', unsafe_allow_html=True)
-    
-    if not MARKET_MAP:
-        st.error("❌ 抓取不到市場清單，無法執行快篩。請確認網路或稍後再試。")
-    else:
-        c1, c2, c3 = st.columns([2, 2, 1])
-        pe_lim = c1.number_input("PE 本益比上限", value=15.0)
-        pb_lim = c2.number_input("PB 淨值比上限", value=1.2)
-        
-        if c3.button("啟動掃描"):
-            with st.spinner('掃描全市場標的中...'):
-                results = []
-                for k, v in MARKET_MAP.items():
-                    if 0 < v['PE'] <= pe_lim and 0 < v['PB'] <= pb_lim:
-                        results.append({'代碼': k, '名稱': v['名稱'], '產業': v['產業'], '現價': v['現價'], 'PE': v['PE'], 'PB': v['PB']})
-                
-                df_res = pd.DataFrame(results)
-                if not df_res.empty:
-                    st.session_state.scan_results_df = df_res.sort_values(by=['產業', 'PE'], ascending=[True, True])
-                else:
-                    st.session_state.scan_results_df = pd.DataFrame()
-                    st.warning("查無符合條件的標的，請放寬 PE 或 PB 限制。")
+    c1, c2, c3 = st.columns([2, 2, 1])
+    pe_lim = c1.number_input("PE 本益比上限", value=15.0)
+    pb_lim = c2.number_input("PB 淨值比上限", value=1.2)
+    if c3.button("啟動掃描"):
+        results = [{'代碼': k, **v} for k, v in MARKET_MAP.items() if 0 < v['PE'] <= pe_lim and 0 < v['PB'] <= pb_lim]
+        st.session_state.scan_results_df = pd.DataFrame(results)
 
-        if 'scan_results_df' in st.session_state:
-            df_display = st.session_state.scan_results_df
-            if not df_display.empty:
-                st.success(f"符合標的共 {len(df_display)} 筆")
-                # 限制顯示數量避免效能崩潰 (前 50 筆)
-                sc_cols = st.columns(3)
-                for i, (idx, row) in enumerate(df_display.head(51).iterrows()):
-                    with sc_cols[i % 3]:
-                        st.markdown(f"""
-                        <div class="stock-card">
-                            <div style="display:flex; justify-content:space-between;"><b>{row['代碼']} {row['名稱']}</b><span class="group-tag">{row['產業']}</span></div>
-                            <hr style="margin:8px 0; border:0; border-top:1px solid #eee;">
-                            <div style="font-size:1.1em; margin-bottom:5px;">現價: <b>${row['現價']}</b></div>
-                            <div style="font-size:0.85em; color:#666;">PE: {row['PE']} | PB: {row['PB']}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        if st.button(f"技術診斷 {row['代碼']}", key=f"sc_{row['代碼']}"):
-                            h_df = fetch_finmind_history(row['代碼'])
-                            if h_df is not None: 
-                                st.session_state.current_plot = (h_df, row['名稱'])
-                                st.rerun()
+    if 'scan_results_df' in st.session_state:
+        df_display = st.session_state.scan_results_df
+        if not df_display.empty:
+            st.info(f"符合標的共 {len(df_display)} 筆")
+            sc_cols = st.columns(3)
+            for i, (idx, row) in enumerate(df_display.iterrows()):
+                with sc_cols[i % 3]:
+                    h_df = fetch_finmind_history(row['代碼'])
+                    strat_name, strat_color, _, _ = get_strategy_suggestion(h_df)
+                    st.markdown(f"""
+                    <div class="stock-card">
+                        <b>{row['代碼']} {row['名稱']}</b> <span class="group-tag">{row['產業']}</span>
+                        <div style="font-size:1.1em; margin:5px 0;">現價: <b>${row['現價']}</b></div>
+                        <div class="strategy-tag" style="background-color:{strat_color};">策略建議: {strat_name}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if st.button(f"技術診斷 {row['代碼']}", key=f"sc_{row['代碼']}"):
+                        if h_df is not None: st.session_state.current_plot = (h_df, row['名稱'])
 
 elif st.session_state.menu == "diagnosis":
     st.markdown('<div class="function-title">功能：🔍 全市場技術分析診斷</div>', unsafe_allow_html=True)
-    if not MARKET_MAP:
-        st.error("無法加載市場列表。")
-    else:
-        selection = st.selectbox("搜尋標的", options=["請選擇..."] + STOCK_OPTIONS)
-        if st.button("執行診斷") and selection != "請選擇...":
-            code, name = selection.split(" ")[0], selection.split(" ")[1]
-            df = fetch_finmind_history(code)
-            if df is not None: st.session_state.current_plot = (df, name)
+    selection = st.selectbox("搜尋標的", options=["請選擇..."] + STOCK_OPTIONS)
+    if st.button("執行診斷") and selection != "請選擇...":
+        code, name = selection.split(" ")[0], selection.split(" ")[1]
+        df = fetch_finmind_history(code)
+        if df is not None: st.session_state.current_plot = (df, name)
 
 elif st.session_state.menu == "management":
     st.markdown('<div class="function-title">功能：📝 庫存清單管理系統</div>', unsafe_allow_html=True)
@@ -267,9 +263,9 @@ elif st.session_state.menu == "management":
         if st.button("確認新增"):
             if new_sel != "請選擇...":
                 n_code, n_name = new_sel.split(" ")[0], new_sel.split(" ")[1]
-                new_data = {'Symbol': n_code, 'Name': n_name, 'Cost': new_cost, 'Shares': new_shares, 'Note': ''}
-                st.session_state.df_portfolio = pd.concat([st.session_state.df_portfolio, pd.DataFrame([new_data])], ignore_index=True)
-                st.success(f"已暫存 {n_name}，請點擊下方儲存。")
+                new_row = pd.DataFrame([{'Symbol': n_code, 'Name': n_name, 'Cost': new_cost, 'Shares': new_shares, 'Note': ''}])
+                st.session_state.df_portfolio = pd.concat([st.session_state.df_portfolio, new_row], ignore_index=True)
+                st.success("✅ 已新增，請點擊下方儲存變更。")
 
     edited_df = st.data_editor(st.session_state.df_portfolio, hide_index=True, use_container_width=True)
     if st.button("💾 儲存所有變更"):
@@ -292,12 +288,12 @@ if 'current_plot' in st.session_state:
     status, color, html, note = get_strategy_suggestion(p_df)
     st.markdown(f"### 💡 策略詳細分析：{p_name}")
     st.markdown(html, unsafe_allow_html=True)
-    
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.5, 0.2, 0.3])
     fig.add_trace(go.Candlestick(x=p_df.index, open=p_df['Open'], high=p_df['High'], low=p_df['Low'], close=p_df['Close'], name='K線'), row=1, col=1)
     fig.add_trace(go.Scatter(x=p_df.index, y=p_df['SMA20'], line=dict(color='orange', width=1), name='20MA'), row=1, col=1)
     fig.add_trace(go.Scatter(x=p_df.index, y=p_df['SMA60'], line=dict(color='blue', width=1), name='60MA'), row=1, col=1)
     fig.add_trace(go.Scatter(x=p_df.index, y=p_df['RSI'], line=dict(color='purple'), name='RSI'), row=2, col=1)
-    fig.add_trace(go.Bar(x=p_df.index, y=p_df['Hist'], marker_color=['#eb093b' if v >= 0 else '#00a651' for v in p_df['Hist']], name='MACD'), row=3, col=1)
+    fig.add_trace(go.Bar(x=p_df.index, y=p_df['Hist'], marker_color=['red' if v>=0 else 'green' for v in p_df['Hist']], name='MACD柱'), row=3, col=1)
     fig.update_layout(height=800, xaxis_rangeslider_visible=False, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
+
